@@ -48,7 +48,7 @@ class L1BankedDataReadLineReq(implicit p: Parameters) extends L1BankedDataReadRe
 // Now, we can write a cache-block in a single cycle
 class L1BankedDataWriteReq(implicit p: Parameters) extends L1BankedDataReadReq
 {
-  val wmask = Bits(DCacheBanks.W)
+  val wmask = Bits(DCacheWays.W)
   val data = Vec(DCacheBanks, Bits(DCacheSRAMRowBits.W))
 }
 
@@ -252,26 +252,42 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   val div_addrs = Wire(Vec(LoadPipelineWidth, UInt()))
   val bank_addrs = Wire(Vec(LoadPipelineWidth, UInt()))
 
-  val line_set_addr = addr_to_dcache_div_set(io.readline.bits.addr)
-  val line_div_addr = addr_to_dcache_div(io.readline.bits.addr)
+
 
   // read data_banks and ecc_banks
   // for single port SRAM, do not allow read and write in the same cycle
-  val rwhazard = RegNext(io.write.valid)
+  // TODO lyq
+  // val rwhazard = RegNext(io.write.valid)
   val rrhazard = false.B // io.readline.valid
+
+  /** addr compute */
+  // write
+  val sram_waddr = addr_to_dcache_div_set(io.write.bits.addr)
+  val sram_wvalid_dup = io.write_dup.map(x => x.valid)
+  val sram_wwayen_dup = io.write_dup.map(x => x.bits.way_en)
+  val sram_waddr_dup = io.write_dup.map(x => addr_to_dcache_div_set(x.bits.addr))
+  val sram_div_addr_dup = io.write_dup.map(x => addr_to_dcache_div(x.bits.addr))
+  val sram_wen_reg = RegNext(io.write.valid)
+  val sram_waddr_reg = RegNext(addr_to_dcache_div_set(io.write.bits.addr))
+  val sram_wvalid_dup_reg = io.write_dup.map(x => RegNext(x.valid))
+  val sram_wwayen_dup_reg = io.write_dup.map(x => RegNext(x.bits.way_en))
+  val sram_waddr_dup_reg = io.write_dup.map(x => RegNext(addr_to_dcache_div_set(x.bits.addr)))
+  val sram_div_addr_dup_reg = io.write_dup.map(x => RegNext(addr_to_dcache_div(x.bits.addr)))
+  // read line
+  val line_set_addr = addr_to_dcache_div_set(io.readline.bits.addr)
+  val line_div_addr = addr_to_dcache_div(io.readline.bits.addr)
+  val line_way_en = io.readline.bits.way_en
+  // read pipe
   (0 until LoadPipelineWidth).map(rport_index => {
     div_addrs(rport_index) := addr_to_dcache_div(io.read(rport_index).bits.addr)
     set_addrs(rport_index) := addr_to_dcache_div_set(io.read(rport_index).bits.addr)
     bank_addrs(rport_index) := addr_to_dcache_bank(io.read(rport_index).bits.addr)
-
-    io.read(rport_index).ready := !(rwhazard || rrhazard)
-
     // use way_en to select a way after data read out
     assert(!(RegNext(io.read(rport_index).fire() && PopCount(io.read(rport_index).bits.way_en) > 1.U)))
     way_en(rport_index) := io.read(rport_index).bits.way_en
   })
-  io.readline.ready := !(rwhazard)
 
+  /** bank conflict */
   // read conflict
   val rr_bank_conflict = Seq.tabulate(LoadPipelineWidth)(x => Seq.tabulate(LoadPipelineWidth)(y =>
     io.read(x).valid && io.read(y).valid &&
@@ -280,23 +296,31 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
     io.read(x).bits.way_en === io.read(y).bits.way_en &&
     set_addrs(x) =/= set_addrs(y)
   ))
-
   val rrl_bank_conflict = Wire(Vec(LoadPipelineWidth, Bool()))
   val rrl_bank_conflict_intend = Wire(Vec(LoadPipelineWidth, Bool()))
   (0 until LoadPipelineWidth).foreach { i =>
     val judge = if (ReduceReadlineConflict) io.read(i).valid && io.readline.bits.rmask(bank_addrs(i))
-                else io.read(i).valid && line_div_addr === div_addrs(i) && io.readline.bits.way_en === way_en(i) && line_set_addr =/= set_addrs(i)
+                else io.read(i).valid && line_div_addr === div_addrs(i) && line_way_en === way_en(i) && line_set_addr =/= set_addrs(i)
     rrl_bank_conflict(i) := judge && io.readline.valid
     rrl_bank_conflict_intend(i) := judge && io.readline_intend
   }
+  // read write conflict
+  val wr_bank_conflict = Seq.tabulate(LoadPipelineWidth)( x =>
+    io.read(x).valid && sram_wen_reg &&
+    div_addrs(x) === sram_div_addr_dup_reg.head &&
+    way_en(x) === sram_wwayen_dup_reg.head
+  )
+  val wrl_bank_conflict = io.readline.valid && sram_wen_reg && line_div_addr === sram_div_addr_dup_reg.head && line_way_en === sram_wwayen_dup_reg.head
+  // ready
+  io.readline.ready := !(wrl_bank_conflict)
+  (0 until LoadPipelineWidth).foreach( i => io.read(i).ready := !(wr_bank_conflict(i) || rrhazard) )
 
-  val rw_bank_conflict = VecInit(Seq.tabulate(LoadPipelineWidth)(io.read(_).valid && rwhazard))
   val perf_multi_read = PopCount(io.read.map(_.valid)) >= 2.U
   (0 until LoadPipelineWidth).foreach(i => {
-    io.bank_conflict_fast(i) := rw_bank_conflict(i) || rrl_bank_conflict(i) ||
+    io.bank_conflict_fast(i) := wr_bank_conflict(i) || rrl_bank_conflict(i) ||
       (if (i == 0) 0.B else (0 until i).map(rr_bank_conflict(_)(i)).reduce(_ || _))
     io.bank_conflict_slow(i) := RegNext(io.bank_conflict_fast(i))
-    io.disable_ld_fast_wakeup(i) := rw_bank_conflict(i) || rrl_bank_conflict_intend(i) ||
+    io.disable_ld_fast_wakeup(i) := wr_bank_conflict(i) || rrl_bank_conflict_intend(i) ||
       (if (i == 0) 0.B else (0 until i).map(rr_bank_conflict(_)(i)).reduce(_ || _))
   })
   XSPerfAccumulate("data_array_multi_read", perf_multi_read)
@@ -305,7 +329,7 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   ))
   (0 until LoadPipelineWidth).foreach(i => {
     XSPerfAccumulate(s"data_array_rrl_bank_conflict_${i}", rrl_bank_conflict(i))
-    XSPerfAccumulate(s"data_array_rw_bank_conflict_${i}", rw_bank_conflict(i))
+    XSPerfAccumulate(s"data_array_rw_bank_conflict_${i}", wr_bank_conflict(i))
     XSPerfAccumulate(s"data_array_read_${i}", io.read(i).valid)
   })
   XSPerfAccumulate("data_array_access_total", PopCount(io.read.map(_.valid)))
@@ -337,9 +361,9 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
         })))
         val readline_en = Wire(Bool())
         if (ReduceReadlineConflict) {
-          readline_en := io.readline.valid && io.readline.bits.rmask(bank_index) && io.readline.bits.way_en(way_index) && div_index.U === line_div_addr
+          readline_en := io.readline.valid && io.readline.bits.rmask(bank_index) && line_way_en(way_index) && div_index.U === line_div_addr
         } else {
-          readline_en := io.readline.valid && io.readline.bits.way_en(way_index) && div_index.U === line_div_addr
+          readline_en := io.readline.valid && line_way_en(way_index) && div_index.U === line_div_addr
         }
         val sram_set_addr = Mux(readline_en,
           addr_to_dcache_div_set(io.readline.bits.addr),
@@ -382,16 +406,11 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
 
   // readline port
   (0 until DCacheBanks).map(i => {
-    io.readline_resp(i) := read_result(RegNext(line_div_addr))(i)(RegNext(OHToUInt(io.readline.bits.way_en)))
+    io.readline_resp(i) := read_result(RegNext(line_div_addr))(i)(RegNext(OHToUInt(line_way_en)))
     io.readline_error_delayed := RegNext(RegNext(io.readline.fire())) && io.readline_resp(i).error_delayed.asUInt().orR
   })
 
   // write data_banks & ecc_banks
-  val sram_waddr = addr_to_dcache_div_set(io.write.bits.addr)
-  val sram_wvalid_dup = io.write_dup.map(x => x.valid)
-  val sram_wwayen_dup = io.write_dup.map(x => x.bits.way_en)
-  val sram_waddr_dup = io.write_dup.map(x => addr_to_dcache_div_set(x.bits.addr))
-  val sram_div_addr_dup = io.write_dup.map(x => addr_to_dcache_div(x.bits.addr))
   for (div_index <- 0 until DCacheSetDiv) {
     for (bank_index <- 0 until DCacheBanks) {
       for (way_index <- 0 until DCacheWays) {
