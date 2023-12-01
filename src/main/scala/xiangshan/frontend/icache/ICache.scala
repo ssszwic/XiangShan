@@ -380,11 +380,13 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
       ))
       // SRAM read logic
       sramBank.io.r.req.valid := io.read.valid
-      if (i == 1)
+      if (i == 1) {
         sramBank.io.r.req.bits.apply(setIdx= io.read.bits(bank).vSetIdx(0))
-      else
-        // read high of nextline if cross cacheline
-        sramBank.io.r.req.bits.apply(setIdx= io.read.bits.last.isDoubleLine.asUInt)
+      } else {
+        // read low of startline if cross cacheline
+        val setIdx = Mux(io.read.bits(bank).isDoubleLine, io.read.bits(bank).vSetIdx(1), io.read.bits(bank).vSetIdx(0))
+        sramBank.io.r.req.bits.apply(setIdx= setIdx)
+      }
 
       // SRAM write logic
       val waymask = io.write.bits.waymask.asTypeOf(Vec(partWayNum, Vec(pWay, Bool())))(bank)
@@ -416,10 +418,12 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
     ))
     // SRAM read logic
     codeArray.io.r.req.valid := io.read.valid
-    if (i == 1)
+    if (i == 1) {
       codeArray.io.r.req.bits.apply(setIdx= io.read.bits.last.vSetIdx(0))
-    else
-      codeArray.io.r.req.bits.apply(setIdx= io.read.bits.last.isDoubleLine.asUInt)
+    } else {
+      val setIdx = Mux(io.read.bits.last.isDoubleLine, io.read.bits.last.vSetIdx(1), io.read.bits.last.vSetIdx(0))
+      codeArray.io.r.req.bits.apply(setIdx= setIdx)
+    }
     // SRAM write logic
     codeArray.io.w.req.valid := io.write.valid
     codeArray.io.w.req.bits.apply(

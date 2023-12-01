@@ -529,9 +529,9 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     ******************************************************************************
     */
   // select one from two missSlots to handle miss for every port
-  val s2_curr_slot_id = Seq.fill(2)(RegInit(false.B))
-  s2_curr_slot_id(0) := !s2_port_hit(0) && !(s2_hit_slot_vec(0)(0) || s2_hit_slot_vec(1)(0))
-  s2_curr_slot_id(1) := !s2_port_hit(1) && !(s2_hit_slot_vec(0)(1) || s2_hit_slot_vec(1)(1))
+  val s2_curr_slot_id = Wire(Vec(2, Bool()))
+  s2_curr_slot_id(0) := DataHoldBypass(!s2_port_hit(0) && !(s2_hit_slot_vec(0)(0) || s2_hit_slot_vec(1)(0)), RegNext(s1_fire))
+  s2_curr_slot_id(1) := DataHoldBypass(!s2_port_hit(1) && !(s2_hit_slot_vec(0)(1) || s2_hit_slot_vec(1)(1)), RegNext(s1_fire))
 
   // only handle port0 miss when port1 have tlb except or pmp except
   val s2_port_miss = Wire(Vec(PortNumber, Bool()))
@@ -617,7 +617,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   val s2_slot_cacheline = (0 until PortNumber).map(port => Mux(s2_hit_slot(port), s2_last_slot_cacheline(port), s2_curr_slot_cacheline(port)))
   val s2_slot_data = Wire(Vec(PortNumber, UInt((blockBits/2).W)))
   s2_slot_data(0) := Mux(s2_double_line, s2_slot_cacheline(0)(1), s2_slot_cacheline(0)(0))
-  s2_slot_data(1) := Mux(s2_double_line, s2_slot_cacheline(1)(0), s2_slot_cacheline(1)(1))
+  s2_slot_data(1) := Mux(s2_double_line, s2_slot_cacheline(1)(0), s2_slot_cacheline(0)(1))
 
   val s2_fetch_data = (0 until PortNumber).map(port => Mux(s2_port_hit(port),
                                                            s2_hit_datas(port),
