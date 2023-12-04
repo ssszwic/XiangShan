@@ -315,7 +315,6 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   val s1_tag_match         = VecInit(s1_tag_match_vec.map(vector => ParallelOR(vector)))
 
   val s1_port_hit          = VecInit(Seq( s1_tag_match(0) && s1_valid && !tlbExcp(0),  s1_tag_match(1) && s1_valid && s1_double_line && !tlbExcp(1) ))
-  val s1_bank_miss         = VecInit(Seq(!s1_tag_match(0) && s1_valid && !tlbExcp(0), !s1_tag_match(1) && s1_valid && s1_double_line && !tlbExcp(1) ))
   val s1_hit               = (s1_port_hit(0) && s1_port_hit(1)) || (!s1_double_line && s1_port_hit(0))
 
   /** choose victim cacheline */
@@ -360,19 +359,6 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   s1_ready := s2_ready && tlbRespAllValid && !s1_wait || !s1_valid
   s1_fire  := s1_valid && tlbRespAllValid && s2_ready && !s1_wait
-
-  if (env.EnableDifftest) {
-    (0 until PortNumber).foreach { i =>
-      val diffPIQ = DifftestModule(new DiffRefillEvent, dontCare = true)
-      diffPIQ.coreid := io.hartId
-      diffPIQ.index := (i + 7).U
-      if (i == 0) diffPIQ.valid := s1_fire && !s1_port_hit(i) && !s1_ipf_hit_latch(i) && s1_piq_hit_latch(i) && !tlbExcp(0)
-      else diffPIQ.valid := s1_fire && !s1_port_hit(i) && !s1_ipf_hit_latch(i) && s1_piq_hit_latch(i) && s1_double_line && !tlbExcp(0) && !tlbExcp(1)
-      diffPIQ.addr := s1_req_paddr(i)
-      diffPIQ.data := s1_piq_data(i).asTypeOf(diffPIQ.data)
-      diffPIQ.idtfr := DontCare
-    }
-  }
 
   // record cacheline log
   val isWriteICacheTable = WireInit(Constantin.createRecord("isWriteICacheTable" + p(XSCoreParamsKey).HartId.toString))
@@ -445,8 +431,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   val s2_only_first           = RegEnable(s1_only_first,        s1_fire)
   val s2_double_line          = RegEnable(s1_double_line,       s1_fire)
   val s2_hit                  = RegEnable(s1_hit,               s1_fire)
-  val s2_port_hit             = RegEnable(s1_port_hit,          s1_fire)   
-  val s2_bank_miss            = RegEnable(s1_bank_miss,         s1_fire)
+  val s2_port_hit             = RegEnable(s1_port_hit,          s1_fire)
   val s2_waymask              = RegEnable(s1_victim_oh,         s1_fire)
   val s2_tag_match_vec        = RegEnable(s1_tag_match_vec,     s1_fire)
 
@@ -530,8 +515,14 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     */
   // select one from two missSlots to handle miss for every port
   val s2_curr_slot_id = Wire(Vec(2, Bool()))
-  s2_curr_slot_id(0) := DataHoldBypass(!s2_port_hit(0) && !(s2_hit_slot_vec(0)(0) || s2_hit_slot_vec(1)(0)), RegNext(s1_fire))
-  s2_curr_slot_id(1) := DataHoldBypass(!s2_port_hit(1) && !(s2_hit_slot_vec(0)(1) || s2_hit_slot_vec(1)(1)), RegNext(s1_fire))
+  // slot(0) hit  && slot(1) hit : don't case
+  // slot(0) hit  && slot(1) miss: (a) missed port(0) -> slot(1); (b) missed port(1) -> slot(1)
+  // slot(0) miss && slot(1) hit : (a) missed port(0) -> slot(0); (b) missed port(1) -> slot(0)
+  // slot(0) miss && slot(1) miss: missed port(0) -> slot(0)  missed port(1) -> slot(1)
+  s2_curr_slot_id(0) := s2_hit_slot_vec(0)(0) || s2_hit_slot_vec(1)(0)
+  s2_curr_slot_id(1) := !(s2_hit_slot_vec(0)(1) || s2_hit_slot_vec(1)(1))
+  val s2_curr_slot_id_reg = RegEnable(s2_curr_slot_id, RegNext(s1_fire))
+
 
   // only handle port0 miss when port1 have tlb except or pmp except
   val s2_port_miss = Wire(Vec(PortNumber, Bool()))
@@ -605,25 +596,29 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     * select data from hitted sram data, last missSlot and current missSlot
     ******************************************************************************
     */
-  val s2_hit_datas    = VecInit(s2_data_cacheline.zipWithIndex.map { case(bank, i) =>
-    val port_hit_data = Mux1H(s2_tag_match_vec(i).asUInt, bank)
-    port_hit_data
-  })
+  // val s2_hit_datas    = VecInit(s2_data_cacheline.zipWithIndex.map { case(bank, i) =>
+  //   val port_hit_data = Mux1H(s2_tag_match_vec(i).asUInt, bank)
+  //   port_hit_data
+  // })
+
+  val s2_hit_datas = Wire(Vec(2, UInt((blockBits/2).W)))
+  s2_hit_datas(0) := Mux1H(s2_tag_match_vec(0).asUInt, s2_data_cacheline(0))
+  s2_hit_datas(1) := Mux1H(Mux(s2_double_line, s2_tag_match_vec(1).asUInt, s2_tag_match_vec(0).asUInt), s2_data_cacheline(1))
 
   // get cacheline from last slot
   val s2_last_slot_cacheline = (0 until PortNumber).map(port => Mux1H(s2_hit_slot_vec(port).asUInt, missSlot.map(_.data_vec)))
   // get cacheline from curr slot
-  val s2_curr_slot_cacheline = (0 until PortNumber).map(port => Mux(s2_curr_slot_id(port), missSlot(1).data_vec, missSlot(0).data_vec))
+  val s2_curr_slot_cacheline = (0 until PortNumber).map(port => Mux(s2_curr_slot_id_reg(port), missSlot(1).data_vec, missSlot(0).data_vec))
   val s2_slot_cacheline = (0 until PortNumber).map(port => Mux(s2_hit_slot(port), s2_last_slot_cacheline(port), s2_curr_slot_cacheline(port)))
   val s2_slot_data = Wire(Vec(PortNumber, UInt((blockBits/2).W)))
   s2_slot_data(0) := Mux(s2_double_line, s2_slot_cacheline(0)(1), s2_slot_cacheline(0)(0))
   s2_slot_data(1) := Mux(s2_double_line, s2_slot_cacheline(1)(0), s2_slot_cacheline(0)(1))
 
-  val s2_fetch_data = (0 until PortNumber).map(port => Mux(s2_port_hit(port),
-                                                           s2_hit_datas(port),
-                                                           s2_slot_data(port)))
+  val s2_fetch_data = Wire(Vec(2, UInt((blockBits/2).W)))
+  s2_fetch_data(0) := Mux(s2_port_hit(0), s2_hit_datas(0), s2_slot_data(0))
+  s2_fetch_data(1) := Mux(s2_port_hit(1) || (s2_port_hit(0) && !s2_double_line), s2_hit_datas(1), s2_slot_data(1))
 
-  val s2_corrupt = (0 until PortNumber).map(port => s2_port_miss(0) && Mux(s2_curr_slot_id(port), missSlot(1).corrupt, missSlot(0).corrupt))
+  val s2_corrupt = (0 until PortNumber).map(port => s2_port_miss(0) && Mux(s2_curr_slot_id_reg(port), missSlot(1).corrupt, missSlot(0).corrupt))
 
   /**
     ******************************************************************************
@@ -782,7 +777,6 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
         diffMainPipeOut.addr  := s2_req_paddr(0)
       } else {
         diffMainPipeOut.valid := s2_fire && !discards(0) && (!s2_double_line || (s2_double_line && !discards(1)))
-          s2_fire && s2_double_line && !discards(0) && !discards(1)
         diffMainPipeOut.addr  := s2_req_paddr(0) + (blockBits/2).U
       }
       diffMainPipeOut.data := Cat(0.U((blockBits/2).W), toIFU(i).bits.data).asTypeOf(diffMainPipeOut.data)
