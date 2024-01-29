@@ -144,6 +144,7 @@ class FrontendImp (outer: Frontend) extends LazyModuleImp(outer)
   ifu.io.icacheInter.topdownIcacheMiss := icache.io.fetch.topdownIcacheMiss
   ifu.io.icacheInter.topdownItlbMiss := icache.io.fetch.topdownItlbMiss
   icache.io.stop := ifu.io.icacheStop
+  icache.io.flush := io.backend.toFtq.redirect.valid
 
   ifu.io.icachePerfInfo := icache.io.perfInfo
 

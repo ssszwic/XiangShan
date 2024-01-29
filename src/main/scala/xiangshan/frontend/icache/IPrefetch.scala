@@ -159,8 +159,7 @@ class PrefetchBuffer(implicit p: Parameters) extends IPrefetchModule
     data    = data_buffer(curr_move_ptr).cacheline,
     idx     = meta_buffer(curr_move_ptr).vSetIdx,
     waymask = fromReplacer.waymask,
-    bankIdx = meta_buffer(curr_move_ptr).vSetIdx(0),
-    paddr   = meta_buffer(curr_move_ptr).paddr)
+    bankIdx = meta_buffer(curr_move_ptr).vSetIdx(0))
 
   // TODO: how to ensure
   assert((toICacheMeta.fire && toICacheData.fire) || (!toICacheMeta.fire && !toICacheData.fire),
@@ -251,16 +250,6 @@ class PrefetchBuffer(implicit p: Parameters) extends IPrefetchModule
   })
 
   XSPerfAccumulate("fdip_fencei_cycle", io.fencei)
-
-  if (env.EnableDifftest) {
-    val difftest = DifftestModule(new DiffRefillEvent, dontCare = true)
-    difftest.coreid  := io.hartId
-    difftest.index   := 6.U
-    difftest.valid   := toICacheData.fire
-    difftest.addr    := toICacheData.bits.paddr
-    difftest.data    := toICacheData.bits.data.asTypeOf(difftest.data)
-    difftest.idtfr   := DontCare
-  }
 }
 
 class IPredfetchIO(implicit p: Parameters) extends IPrefetchBundle {
@@ -802,15 +791,15 @@ class PrefetchQueue(edge: TLEdgeOut)(implicit p: Parameters) extends IPrefetchMo
   // the number of prefetch request sent to L2Cache
   XSPerfAccumulate("prefetch_req_send_L2", io.mem_acquire.fire)
 
-  if (env.EnableDifftest) {
-    val diffipfrefill = DifftestModule(new DiffRefillEvent, dontCare = true)
-    diffipfrefill.coreid   := io.hartId
-    diffipfrefill.index    := 3.U
-    diffipfrefill.valid    := handleEntry.valid && handleEntry.finish
-    diffipfrefill.addr     := handleEntry.paddr
-    diffipfrefill.data     := handleEntry.cacheline.asTypeOf(diffipfrefill.data)
-    diffipfrefill.idtfr    := DontCare
-  }
+  // if (env.EnableDifftest) {
+  //   val diffipfrefill = DifftestModule(new DiffRefillEvent, dontCare = true)
+  //   diffipfrefill.coreid   := io.hartId
+  //   diffipfrefill.index    := 3.U
+  //   diffipfrefill.valid    := handleEntry.valid && handleEntry.finish
+  //   diffipfrefill.addr     := handleEntry.paddr
+  //   diffipfrefill.data     := handleEntry.cacheline.asTypeOf(diffipfrefill.data)
+  //   diffipfrefill.idtfr    := DontCare
+  // }
 }
 
 class FDIPPrefetchIO(edge: TLEdgeOut)(implicit p: Parameters) extends IPrefetchBundle {
