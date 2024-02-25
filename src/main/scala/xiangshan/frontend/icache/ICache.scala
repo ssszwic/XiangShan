@@ -488,6 +488,40 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
 }
 
 
+class ICacheReplacer(implicit p: Parameters) extends ICacheModule {
+  val io = IO(new Bundle {
+    val touch   = Vec(PortNumber, Flipped(ValidIO(new ReplacerTouch)))
+    val victim  = Flipped(new ReplacerVictim)
+  })
+
+  val replacers = Seq.fill(PortNumber)(ReplacementPolicy.fromString(cacheParams.replacer,nWays,nSets/PortNumber))
+
+  // touch
+  val touch_sets = Seq.fill(PortNumber)(Wire(Vec(2, UInt(log2Ceil(nSets/2).W))))
+  val touch_ways = Seq.fill(PortNumber)(Wire(Vec(2, Valid(UInt(log2Ceil(nWays).W)))))
+  (0 until PortNumber).foreach {i =>
+    touch_sets(i)(0)        := Mux(io.touch(i).bits.vsetIdx(0), io.touch(1).bits.vsetIdx(highestIdxBit, 1), io.touch(0).bits.vsetIdx(highestIdxBit, 1))
+    touch_ways(i)(0).bits   := Mux(io.touch(i).bits.vsetIdx(0), io.touch(1).bits.way, io.touch(0).bits.way)
+    touch_ways(i)(0).valid  := Mux(io.touch(i).bits.vsetIdx(0), io.touch(1).valid, io.touch(0).valid)
+  }
+
+  // victim
+  io.victim.way := Mux(io.victim.vsetIdx.bits(0),
+                       replacers(1).way(io.victim.vsetIdx.bits(highestIdxBit, 1)),
+                       replacers(0).way(io.victim.vsetIdx.bits(highestIdxBit, 1)))
+
+  // touch the victim in next cycle
+  val victim_vsetIdx_reg  = RegEnable(io.victim.vsetIdx.bits, io.victim.vsetIdx.valid)
+  val victim_way_reg      = RegEnable(io.victim.way,          io.victim.vsetIdx.valid)
+  (0 until PortNumber).foreach {i =>
+    touch_sets(i)(1)        := victim_vsetIdx_reg(highestIdxBit, 1)
+    touch_ways(i)(1).bits   := victim_way_reg
+    touch_ways(i)(1).valid  := RegNext(io.victim.vsetIdx.valid) && (victim_vsetIdx_reg(0) === i.U)
+  }
+
+  ((replacers zip touch_sets) zip touch_ways).map{case ((r, s),w) => r.access(s,w)}
+}
+
 class ICacheIO(implicit p: Parameters) extends ICacheBundle
 {
   val hartId = Input(UInt(8.W))
@@ -547,6 +581,7 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
   // val prefetchMetaArray = Module(new ICacheMetaArrayNoBanked)
   val mainPipe          = Module(new ICacheMainPipe)
   val missUnit          = Module(new ICacheMissUnit(edge))
+  val replacer          = Module(new ICacheReplacer)
   // val fdipPrefetch      = Module(new FDIPPrefetch(edge))
 
   // fdipPrefetch.io.hartId              := io.hartId
@@ -567,7 +602,6 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
   missUnit.io.flush           := io.flush
   missUnit.io.fetch_req       <> mainPipe.io.mshr.req
   missUnit.io.prefetch_req    <> DontCare
-  missUnit.io.lookUps         <> DontCare
   missUnit.io.mem_grant.valid := false.B
   missUnit.io.mem_grant.bits  := DontCare
   missUnit.io.mem_grant       <> bus.d
@@ -581,19 +615,15 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
   metaArray.io.read     <> mainPipe.io.metaArray.toIMeta
   metaArray.io.readResp <> mainPipe.io.metaArray.fromIMeta
 
-  mainPipe.io.flush <> io.flush
-  mainPipe.io.IPFBufferRead <> DontCare
-  mainPipe.io.PIQRead <> DontCare
-  mainPipe.io.IPFReplacer <> DontCare
-  mainPipe.io.ICacheMainPipeInfo <> DontCare
-
+  mainPipe.io.flush             <> io.flush
   mainPipe.io.respStall         := io.stop
   mainPipe.io.csr_parity_enable := io.csr_parity_enable
   mainPipe.io.hartId            := io.hartId
   mainPipe.io.mshr.resp         <> missUnit.io.fetch_resp
   mainPipe.io.fetch.req         <> io.fetch.req
 
-  
+  replacer.io.touch   <> mainPipe.io.touch
+  replacer.io.victim  <> missUnit.io.victim
 
   io.pmp(0) <> mainPipe.io.pmp(0)
   io.pmp(1) <> mainPipe.io.pmp(1)

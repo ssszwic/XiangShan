@@ -301,7 +301,7 @@ case class DebugOptions
   EnablePerfDebug: Boolean = true,
   UseDRAMSim: Boolean = false,
   EnableConstantin: Boolean = false,
-  EnableChiselDB: Boolean = false,
+  EnableChiselDB: Boolean = true,
   AlwaysBasicDB: Boolean = true,
   EnableRollingDB: Boolean = false
 )
