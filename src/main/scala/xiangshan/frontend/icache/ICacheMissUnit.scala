@@ -258,7 +258,7 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
 
   val fetchMSHRs = (0 until nFetchMshr).map { i =>
     val mshr = Module(new ICacheMSHR(edge, true, i))
-    mshr.io.flush   := io.flush
+    mshr.io.flush   := false.B
     mshr.io.fencei  := io.fencei
     mshr.io.req <> fetchDemux.io.out(i)
     mshr.io.lookUps(0).info.valid := io.fetch_req.valid
