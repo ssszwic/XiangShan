@@ -75,6 +75,7 @@ class MuxBundle[T <: Data](val gen: T, val n: Int) extends Module
     when(io.sel === i.U) {
       io.out <> io.in(i)
     }
+    io.in(i).ready := (io.sel === i.U) && io.out.ready
   }
 }
 
@@ -189,11 +190,6 @@ class ICacheMSHR(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
   io.resp.bits.vsetIdx  := vsetIdx
 }
 
-class WriteMetaInfo(implicit p: Parameters) extends IPrefetchBundle {
-  val blkPaddr  = UInt((PAddrBits - blockBits).W)
-  val vsetIdx   = UInt(idxBits.W)
-}
-
 class ICacheMissBundle(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheBundle{
   // difftest
   val hartId      = Input(Bool())
@@ -204,7 +200,8 @@ class ICacheMissBundle(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheBu
   val fetch_req     = Flipped(DecoupledIO(new ICacheMissReq))
   val fetch_resp    = ValidIO(new ICacheMissResp)
   // prefetch
-  val prefetch_req  = Flipped(DecoupledIO(new ICacheMissReq))
+  val prefetch_req      = Flipped(DecoupledIO(new ICacheMissReq))
+  val prefetch_req_hit  = Output(Bool())
   // SRAM Write Req
   val meta_write    = DecoupledIO(new ICacheMetaWriteBundle)
   val data_write    = DecoupledIO(new ICacheDataWriteBundle)
@@ -248,11 +245,10 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
   
   // To avoid duplicate request reception.
   val fetchHit    = Wire(Bool())
-  val prefetchHit = Wire(Bool())
   fetchDemux.io.in            <> io.fetch_req
   fetchDemux.io.in.valid      := io.fetch_req.valid && !fetchHit
+  io.fetch_req.ready          := fetchDemux.io.in.ready || fetchHit
   prefetchDemux.io.in         <> io.prefetch_req
-  prefetchDemux.io.in.valid   := io.prefetch_req.valid && !prefetchHit
   io.mem_acquire              <> acquireArb.io.out
   acquireArb.io.in.last       <> prefetchArb.io.out
 
@@ -289,9 +285,11 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
     ******************************************************************************
     */
   val allMSHRs = (fetchMSHRs ++ prefetchMSHRs)
-  fetchHit     := allMSHRs.map(mshr => mshr.io.lookUps(0).hit).reduce(_||_)
-  prefetchHit  := allMSHRs.map(mshr => mshr.io.lookUps(1).hit).reduce(_||_)
-
+  val prefetchHitFetchReq = (io.prefetch_req.bits.blkPaddr === io.fetch_req.bits.blkPaddr) &&
+                            (io.prefetch_req.bits.vsetIdx === io.fetch_req.bits.vsetIdx) &&
+                            io.fetch_req.valid
+  fetchHit := allMSHRs.map(mshr => mshr.io.lookUps(0).hit).reduce(_||_)
+  io.prefetch_req_hit := allMSHRs.map(mshr => mshr.io.lookUps(1).hit).reduce(_||_) || prefetchHitFetchReq
 
   /**
     ******************************************************************************
@@ -305,11 +303,11 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
   // So the depth of the FIFO is set to match the number of MSHRs.
   val priorityFIFO = Module(new Queue(UInt(log2Ceil(nPrefetchMshr).W), nPrefetchMshr, hasFlush=true))
   priorityFIFO.io.flush.get := io.flush || io.fencei
-  priorityFIFO.io.enq.valid := io.prefetch_req.fire
+  priorityFIFO.io.enq.valid := prefetchDemux.io.in.fire
   priorityFIFO.io.enq.bits  := prefetchDemux.io.chosen
   priorityFIFO.io.deq.ready := prefetchArb.io.out.fire
   prefetchArb.io.sel        := priorityFIFO.io.deq.bits
-  assert(!(priorityFIFO.io.enq.fire ^ io.prefetch_req.fire), "priorityFIFO.io.enq and io.prefetch_req must fire at the same cycle")
+  assert(!(priorityFIFO.io.enq.fire ^ prefetchDemux.io.in.fire), "priorityFIFO.io.enq and io.prefetch_req must fire at the same cycle")
   assert(!(priorityFIFO.io.deq.fire ^ prefetchArb.io.out.fire), "priorityFIFO.io.deq and prefetchArb.io.out must fire at the same cycle")
 
   /**
@@ -383,8 +381,20 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
   io.fetch_resp.bits.data     := respDataReg.asUInt
   io.fetch_resp.bits.corrupt  := corrupt_r
 
-  // record ICache SRAM write log
+  /**
+    ******************************************************************************
+    * performance counter
+    ******************************************************************************
+    */
+  // Duplicate requests will be excluded.
+  XSPerfAccumulate("enq_fetch_req",     fetchDemux.io.in.fire)
+  XSPerfAccumulate("enq_prefetch_req",  prefetchDemux.io.in.fire)
 
+  /**
+    ******************************************************************************
+    * ChiselDB: record ICache SRAM write log
+    ******************************************************************************
+    */
   class ICacheSRAMDB(implicit p: Parameters) extends ICacheBundle{
     val blkPaddr  = UInt((PAddrBits - blockOffBits).W)
     val vsetIdx   = UInt(idxBits.W)

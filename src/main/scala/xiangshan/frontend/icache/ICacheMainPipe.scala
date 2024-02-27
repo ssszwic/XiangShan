@@ -664,8 +664,6 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     XSPerfAccumulate(s"icache_port${i}_miss",      RegNext(s1_fire) && s2_miss(i))
   }
 
-  XSPerfAccumulate("port1_req", s2_fire && s2_double_line)
-
   /**
     ******************************************************************************
     * difftest refill check

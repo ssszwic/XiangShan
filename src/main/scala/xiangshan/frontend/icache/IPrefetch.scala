@@ -33,16 +33,16 @@ abstract class IPrefetchBundle(implicit p: Parameters) extends ICacheBundle
 abstract class IPrefetchModule(implicit p: Parameters) extends ICacheModule
 
 class IPredfetchIO(implicit p: Parameters) extends IPrefetchBundle {
-  val ftqReq        = Flipped(new FtqPrefechBundle)
-  val iTLBInter     = new TlbRequestIO
-  val pmp           = new ICachePMPBundle
-  val metaReadReq   = Decoupled(new PrefetchMetaReadBundle)
-  val metaReadResp  = Input(new PrefetchMetaRespBundle)
-  val prefetchReq   = DecoupledIO(new ICacheMissReq)
-  val writeMetaInfo = Flipped(ValidIO(new WriteMetaInfo))
-  // val mainPipeInfo  = Flipped(new MainPipeInfo)
-  val flush         = Input(Bool())
-  val csr_pf_enable = Input(Bool())
+  val ftqReq            = Flipped(new FtqPrefechBundle)
+  val iTLBInter         = new TlbRequestIO
+  val pmp               = new ICachePMPBundle
+  val metaReadReq       = Decoupled(new PrefetchMetaReadBundle)
+  val metaReadResp      = Input(new PrefetchMetaRespBundle)
+  val prefetchReq       = DecoupledIO(new ICacheMissReq)
+  val prefetch_req_hit  = Input(Bool())
+  val MSHRResp          = Flipped(ValidIO(new ICacheMissResp))
+  val flush             = Input(Bool())
+  val csr_pf_enable     = Input(Bool())
 }
 
 class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
@@ -53,9 +53,11 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
   val (toITLB,  fromITLB) = (io.iTLBInter.req, io.iTLBInter.resp)
   val (toPMP,  fromPMP)   = (io.pmp.req, io.pmp.resp)
   val (toIMeta, fromIMeta, fromIMetaValid) = (io.metaReadReq, io.metaReadResp.metaData, io.metaReadResp.entryValid)
-  val toMissUnit = io.prefetchReq
+  val fromMSHR  = io.MSHRResp
+  val toMSHR    = io.prefetchReq
 
-  val enableBit = RegInit(io.csr_pf_enable, false.B)
+  val enableBit = RegInit(false.B)
+  enableBit := io.csr_pf_enable
 
   val p0_fire, p1_fire, p2_fire           = WireInit(false.B)
   val p0_discard, p1_discard, p2_discard  = WireInit(false.B)
@@ -97,7 +99,7 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
   fromFtq.req.ready := p0_ready
 
   /** stage 0 control */
-  // Cancel request when prefetch not enable or the request from FTQ is same as last time
+  // Cancel request when prefetch not enable
   p0_req_cancel := !enableBit
   p0_ready      := p1_ready && toITLB.ready && toIMeta.ready && !io.flush
   p0_fire       := p0_valid && p0_ready && !p0_req_cancel && !io.flush
@@ -127,9 +129,8 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
 
   /** 3. Monitor the requests from missUnit to write to SRAM */
   // Continuous checking with combinatorial logic.
-  val p1_monitor_hit = (io.writeMetaInfo.bits.blkPaddr === getBlkAddr(p1_paddr)) &&
-                       (io.writeMetaInfo.bits.vsetIdx === p1_vsetIdx) &&
-                       io.writeMetaInfo.valid
+  val p1_monitor_hit = (fromMSHR.bits.blkPaddr === getBlkAddr(p1_paddr)) &&
+                       (fromMSHR.bits.vsetIdx === p1_vsetIdx) && fromMSHR.valid
 
   /** Stage 1 control */
   p1_req_cancel := p1_tlb_miss || p1_tlb_except || p1_meta_hit || p1_monitor_hit
@@ -141,12 +142,10 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
     ******************************************************************************
     * IPrefetch Stage 2
     * - 1. PMP Check: send req and receive resq in the same cycle
-    * - 2. Monitor the requests from missUnit to write to SRAM
-    // * - 3. check mainPipe s2
-    * - 4. send req to missUnit
+    * - 2. send req to missUnit
     ******************************************************************************
     */
-  val p2_valid  = generatePipeControl(lastFire = p1_fire, thisFire = p2_fire || p2_discard, thisFlush = io.flush, lastFlush = false.B)
+  val p2_valid = generatePipeControl(lastFire = p1_fire, thisFire = p2_fire || p2_discard, thisFlush = io.flush, lastFlush = false.B)
 
   val p2_paddr      = RegEnable(p1_paddr, p1_fire)
   val p2_vsetIdx    = RegEnable(p1_vsetIdx, p1_fire)
@@ -160,30 +159,25 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
   toPMP.bits.size := 3.U
   toPMP.bits.cmd  := TlbCmd.exec
 
-  /** 2. Monitor the requests from missUnit to write to SRAM */
-  val p2_monitor_hit = (io.writeMetaInfo.bits.blkPaddr === getBlkAddr(p2_paddr)) &&
-                       (io.writeMetaInfo.bits.vsetIdx === p2_vsetIdx) &&
-                       io.writeMetaInfo.valid
-
   // /** 3. check mainPipe s2 */
   // val p2_mainPipe_hit = io.mainPipeInfo.s2.map(info => info.valid && (info.bits === getBlkAddr(p2_paddr))).reduce(_||_)
 
   /** Stage 2 control */
-  p2_req_cancel := p2_pmp_except || p2_monitor_hit
-  p2_ready      := p2_valid && toMissUnit.ready || !p2_valid
-  p2_fire       := toMissUnit.fire
+  p2_req_cancel := p2_pmp_except || io.prefetch_req_hit
+  p2_ready      := p2_valid && toMSHR.ready || !p2_valid
+  p2_fire       := toMSHR.fire
   p2_discard    := p2_valid && p2_req_cancel
 
   /** 4. send req to missUnit */
-  toMissUnit.valid          := p2_valid && !p2_req_cancel && !io.flush
-  toMissUnit.bits.blkPaddr  := getBlkAddr(p2_paddr)
-  toMissUnit.bits.vsetIdx   := p2_vsetIdx
+  toMSHR.valid          := p2_valid && !p2_req_cancel && !io.flush
+  toMSHR.bits.blkPaddr  := getBlkAddr(p2_paddr)
+  toMSHR.bits.vsetIdx   := p2_vsetIdx
 
   /** PerfAccumulate */
   // the number of prefetch request received from ftq
   XSPerfAccumulate("prefetch_req_receive", fromFtq.req.fire)
   // the number of prefetch request sent to missUnit
-  XSPerfAccumulate("prefetch_req_send", toMissUnit.fire)
+  XSPerfAccumulate("prefetch_req_send", toMSHR.fire)
   /**
     * Count the number of requests that are filtered for various reasons.
     * The number of prefetch discard in Performance Accumulator may be
@@ -202,8 +196,6 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
   XSPerfAccumulate("fdip_prefetch_discard_by_p1_monoitor", p1_discard && p1_monitor_hit)
   // discard prefetch request by pmp except or mmio
   XSPerfAccumulate("fdip_prefetch_discard_by_pmp",         p2_discard && p2_pmp_except)
-  // discard prefetch request by hit wirte SRAM
-  XSPerfAccumulate("fdip_prefetch_discard_by_p2_monoitor", p2_discard && p2_monitor_hit)
   // discard prefetch request by hit mainPipe info
   // XSPerfAccumulate("fdip_prefetch_discard_by_mainPipe",    p2_discard && p2_mainPipe_hit)
 } 
