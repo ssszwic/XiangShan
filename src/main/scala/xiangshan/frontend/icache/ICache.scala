@@ -52,7 +52,7 @@ case class ICacheParameters(
     minRangeFromIFUptr: Int = 2,
     maxRangeFromIFUptr: Int = 32,
 
-    nFetchMshr: Int = 2,
+    nFetchMshr: Int = 4,
     nPrefetchMshr: Int = 10,
     
     nMMIOs: Int = 1,
