@@ -28,6 +28,7 @@ class ICacheReadBundle(implicit p: Parameters) extends ICacheBundle
 {
   val isDoubleLine  = Bool()
   val vSetIdx       = Vec(2,UInt(log2Ceil(nSets).W))
+  val waymask       = Vec(2,Vec(nWays, Bool()))
 
   def port_0_read_0 =  !vSetIdx(0)(0)
   def port_0_read_1 =   vSetIdx(0)(0)
@@ -82,8 +83,8 @@ class ICacheDataWriteBundle(implicit p: Parameters) extends ICacheBundle
 
 class ICacheDataRespBundle(implicit p: Parameters) extends ICacheBundle
 {
-  val datas = Vec(2, Vec(nWays,  UInt((blockBits/2).W)))
-  val codes = Vec(2, Vec(nWays , UInt(dataCodeEntryBits.W)))
+  val datas   = Vec(nBanks, UInt((blockBits/2).W))
+  val errors  = Vec(nBanks, Bool())
 }
 
 class ICacheMetaReadBundle(implicit p: Parameters) extends ICacheBundle
@@ -93,11 +94,11 @@ class ICacheMetaReadBundle(implicit p: Parameters) extends ICacheBundle
 }
 
 class ReplacerTouch(implicit p: Parameters) extends ICacheBundle {
-  val vsetIdx = UInt(log2Ceil(nSets).W)
+  val vSetIdx = UInt(log2Ceil(nSets).W)
   val way     = UInt(log2Ceil(nWays).W)
 }
 
 class ReplacerVictim(implicit p: Parameters) extends ICacheBundle {
-  val vsetIdx = ValidIO(UInt(log2Ceil(nSets).W))
+  val vSetIdx = ValidIO(UInt(log2Ceil(nSets).W))
   val way     = Input(UInt(log2Ceil(nWays).W))
 }

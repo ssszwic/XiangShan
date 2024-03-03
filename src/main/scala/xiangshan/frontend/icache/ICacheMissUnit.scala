@@ -82,13 +82,14 @@ class MuxBundle[T <: Data](val gen: T, val n: Int) extends Module
 
 class ICacheMissReq(implicit p: Parameters) extends ICacheBundle {
   val blkPaddr  = UInt((PAddrBits - blockOffBits).W)
-  val vsetIdx   = UInt(idxBits.W)
+  val vSetIdx   = UInt(idxBits.W)
 }
 
 
 class ICacheMissResp(implicit p: Parameters) extends ICacheBundle {
   val blkPaddr  = UInt((PAddrBits - blockOffBits).W)
-  val vsetIdx   = UInt(idxBits.W)
+  val vSetIdx   = UInt(idxBits.W)
+  val way       = UInt(log2Ceil(nWays).W)
   val data      = UInt(blockBits.W)
   val corrupt   = Bool()
 }
@@ -125,34 +126,28 @@ class ICacheMSHR(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
   val issue     = RegInit(Bool(), false.B)
 
   val blkPaddr  = RegInit(UInt((PAddrBits - blockOffBits).W), 0.U)
-  val vsetIdx   = RegInit(UInt(idxBits.W), 0.U)
+  val vSetIdx   = RegInit(UInt(idxBits.W), 0.U)
 
   // look up and return result at the same cycle
-  val hits = io.lookUps.map(lookup => valid && !fencei && (lookup.info.bits.vsetIdx === vsetIdx) && 
+  val hits = io.lookUps.map(lookup => valid && !fencei && !flush && (lookup.info.bits.vSetIdx === vSetIdx) && 
                                       (lookup.info.bits.blkPaddr === blkPaddr))
   // Decoupling valid and bits
-  val hit = hits.zipWithIndex.map{case(h, i) => h && io.lookUps(i).info.valid}.reduce(_||_)
   (0 until 2).foreach { i =>
     io.lookUps(i).hit := hits(i)
   }
 
-  // wake up when hit MSHR (fencei is low)
-  when(hit) {
-    flush := false.B
-  }
+  // disable wake up when hit MSHR (fencei is low)
+  // when(hit) {
+  //   flush := false.B
+  // }
 
   // invalid when the req hasn't been issued
-  // invalid after grant finish when the req has been issued
-  when(io.flush || io.fencei) {
-    when(issue) {
-      flush := true.B
-    }.otherwise {
+  when(io.fencei) {
+    fencei  := true.B
+    flush   := true.B
+    when(!issue) {
       valid := false.B
     }
-  }
-
-  when(io.fencei) {
-    fencei := true.B
   }
 
   // receive request and register
@@ -163,7 +158,7 @@ class ICacheMSHR(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
     issue     := false.B
     fencei    := false.B
     blkPaddr  := io.req.bits.blkPaddr
-    vsetIdx   := io.req.bits.vsetIdx
+    vSetIdx   := io.req.bits.vSetIdx
   }
 
   // send request to L2
@@ -185,9 +180,9 @@ class ICacheMSHR(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
   }
 
   // offer the information other than data for write sram and response fetch
-  io.resp.valid         := valid && (!flush || (flush && !fencei && hit))
+  io.resp.valid         := valid && (!flush && !fencei)
   io.resp.bits.blkPaddr := blkPaddr
-  io.resp.bits.vsetIdx  := vsetIdx
+  io.resp.bits.vSetIdx  := vSetIdx
 }
 
 class ICacheMissBundle(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheBundle{
@@ -201,7 +196,6 @@ class ICacheMissBundle(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheBu
   val fetch_resp    = ValidIO(new ICacheMissResp)
   // prefetch
   val prefetch_req      = Flipped(DecoupledIO(new ICacheMissReq))
-  val prefetch_req_hit  = Output(Bool())
   // SRAM Write Req
   val meta_write    = DecoupledIO(new ICacheMetaWriteBundle)
   val data_write    = DecoupledIO(new ICacheDataWriteBundle)
@@ -244,11 +238,13 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
   val acquireArb    = Module(new Arbiter(new TLBundleA(edge.bundle), nFetchMshr + 1))
   
   // To avoid duplicate request reception.
-  val fetchHit    = Wire(Bool())
+  val fetchHit, prefetchHit   = Wire(Bool())
   fetchDemux.io.in            <> io.fetch_req
   fetchDemux.io.in.valid      := io.fetch_req.valid && !fetchHit
   io.fetch_req.ready          := fetchDemux.io.in.ready || fetchHit
   prefetchDemux.io.in         <> io.prefetch_req
+  prefetchDemux.io.in.valid   := io.prefetch_req.valid && !prefetchHit
+  io.prefetch_req.ready       := prefetchDemux.io.in.ready || prefetchHit
   io.mem_acquire              <> acquireArb.io.out
   acquireArb.io.in.last       <> prefetchArb.io.out
 
@@ -286,10 +282,10 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
     */
   val allMSHRs = (fetchMSHRs ++ prefetchMSHRs)
   val prefetchHitFetchReq = (io.prefetch_req.bits.blkPaddr === io.fetch_req.bits.blkPaddr) &&
-                            (io.prefetch_req.bits.vsetIdx === io.fetch_req.bits.vsetIdx) &&
+                            (io.prefetch_req.bits.vSetIdx === io.fetch_req.bits.vSetIdx) &&
                             io.fetch_req.valid
-  fetchHit := allMSHRs.map(mshr => mshr.io.lookUps(0).hit).reduce(_||_)
-  io.prefetch_req_hit := allMSHRs.map(mshr => mshr.io.lookUps(1).hit).reduce(_||_) || prefetchHitFetchReq
+  fetchHit    := allMSHRs.map(mshr => mshr.io.lookUps(0).hit).reduce(_||_)
+  prefetchHit := allMSHRs.map(mshr => mshr.io.lookUps(1).hit).reduce(_||_) || prefetchHitFetchReq
 
   /**
     ******************************************************************************
@@ -357,19 +353,19 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
 
   // get waymask from replacer
   val write_sram_valid = mshr_resp.valid && last_fire_r && !io.flush && !io.fencei && !corrupt_r
-  io.victim.vsetIdx.valid := write_sram_valid
-  io.victim.vsetIdx.bits  := mshr_resp.bits.vsetIdx
+  io.victim.vSetIdx.valid := write_sram_valid
+  io.victim.vSetIdx.bits  := mshr_resp.bits.vSetIdx
   val waymask = UIntToOH(io.victim.way)
 
   // write SRAM
   io.meta_write.bits.generate(tag     = getPhyTagFromBlk(mshr_resp.bits.blkPaddr),
-                              idx     = mshr_resp.bits.vsetIdx,
+                              idx     = mshr_resp.bits.vSetIdx,
                               waymask = waymask,
-                              bankIdx = mshr_resp.bits.vsetIdx(0))
+                              bankIdx = mshr_resp.bits.vSetIdx(0))
   io.data_write.bits.generate(data    = respDataReg.asUInt,
-                              idx     = mshr_resp.bits.vsetIdx,
+                              idx     = mshr_resp.bits.vSetIdx,
                               waymask = waymask,
-                              bankIdx = mshr_resp.bits.vsetIdx(0))
+                              bankIdx = mshr_resp.bits.vSetIdx(0))
    
   io.meta_write.valid := write_sram_valid
   io.data_write.valid := write_sram_valid
@@ -377,7 +373,8 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
   // response fetch
   io.fetch_resp.valid         := mshr_resp.valid && last_fire_r && !io.flush && !io.fencei
   io.fetch_resp.bits.blkPaddr := mshr_resp.bits.blkPaddr
-  io.fetch_resp.bits.vsetIdx  := mshr_resp.bits.vsetIdx
+  io.fetch_resp.bits.vSetIdx  := mshr_resp.bits.vSetIdx
+  io.fetch_resp.bits.way      := io.victim.way
   io.fetch_resp.bits.data     := respDataReg.asUInt
   io.fetch_resp.bits.corrupt  := corrupt_r
 
@@ -397,7 +394,7 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
     */
   class ICacheSRAMDB(implicit p: Parameters) extends ICacheBundle{
     val blkPaddr  = UInt((PAddrBits - blockOffBits).W)
-    val vsetIdx   = UInt(idxBits.W)
+    val vSetIdx   = UInt(idxBits.W)
     val waymask   = UInt(log2Ceil(nWays).W)
   }
 
@@ -406,7 +403,7 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
 
   val ICacheSRAMDBDumpData = Wire(new ICacheSRAMDB)
   ICacheSRAMDBDumpData.blkPaddr  := mshr_resp.bits.blkPaddr
-  ICacheSRAMDBDumpData.vsetIdx   := mshr_resp.bits.vsetIdx
+  ICacheSRAMDBDumpData.vSetIdx   := mshr_resp.bits.vSetIdx
   ICacheSRAMDBDumpData.waymask   := OHToUInt(waymask)
   ICacheSRAMTable.log(
     data  = ICacheSRAMDBDumpData,
