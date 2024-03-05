@@ -534,8 +534,8 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   val ifuPtr_write       = WireInit(ifuPtr)
   val ifuPtrPlus1_write  = WireInit(ifuPtrPlus1)
   val ifuPtrPlus2_write  = WireInit(ifuPtrPlus2)
-  val pfPtr_write        = WireInit(ifuPtr)
-  val pfPtrPlus1_write   = WireInit(ifuPtrPlus1)
+  val pfPtr_write        = WireInit(pfPtr)
+  val pfPtrPlus1_write   = WireInit(pfPtrPlus1)
   val ifuWbPtr_write     = WireInit(ifuWbPtr)
   val commPtr_write      = WireInit(commPtr)
   val commPtrPlus1_write = WireInit(commPtrPlus1)
@@ -749,6 +749,7 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   val bpu_in_bypass_buf_for_ifu = bpu_in_bypass_buf
   val bpu_in_bypass_ptr = RegNext(bpu_in_resp_ptr)
   val last_cycle_to_ifu_fire = RegNext(io.toIfu.req.fire)
+  val last_cycle_to_pf_fire = RegNext(io.toPrefetch.req.fire)
 
   val copied_bpu_in_bypass_ptr = VecInit(Seq.fill(copyNum)(RegNext(bpu_in_resp_ptr)))
   val copied_last_cycle_to_ifu_fire = VecInit(Seq.fill(copyNum)(RegNext(io.toIfu.req.fire)))
@@ -797,12 +798,12 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   when(last_cycle_bpu_in && bpu_in_bypass_ptr === pfPtr){
     toPrefetchPcBundle      := bpu_in_bypass_buf
     toPrefetchEntryToSend   := true.B
-  }.elsewhen(last_cycle_to_ifu_fire){
+  }.elsewhen(last_cycle_to_pf_fire){
     toPrefetchPcBundle      := RegNext(ftq_pc_mem.io.pfPtrPlus1_rdata)
     toPrefetchEntryToSend   := RegNext(entry_fetch_status(pfPtrPlus1.value) === f_to_send) || 
                                RegNext(last_cycle_bpu_in && bpu_in_bypass_ptr === (pfPtrPlus1))
   }.otherwise{
-    toPrefetchPcBundle      := bpu_in_bypass_buf
+    toPrefetchPcBundle      := RegNext(ftq_pc_mem.io.pfPtr_rdata)
     toPrefetchEntryToSend   := RegNext(entry_fetch_status(pfPtr.value) === f_to_send) ||
                                RegNext(last_cycle_bpu_in && bpu_in_bypass_ptr === pfPtr) // reduce potential bubbles
   }

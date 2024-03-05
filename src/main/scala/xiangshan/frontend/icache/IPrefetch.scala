@@ -129,11 +129,11 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
     */
   val s1_valid = generatePipeControl(lastFire = s0_fire, thisFire = s1_fire || s1_discard, thisFlush = s1_flush, lastFlush = false.B)
 
-  val s1_req_vaddrs = RegEnable(s0_req_vaddr, s0_fire)
+  val s1_req_vaddr  = RegEnable(s0_req_vaddr, s0_fire)
   val s1_doubleline = RegEnable(s0_doubleline, s0_fire)
   val s1_req_ftqIdx = RegEnable(s0_req_ftqIdx, s0_fire)
 
-  val s1_req_vSetIdx = VecInit(s1_req_vaddrs.map(get_idx(_)))
+  val s1_req_vSetIdx = VecInit(s1_req_vaddr.map(get_idx(_)))
 
   /**
     ******************************************************************************
@@ -161,8 +161,8 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
 
   val s1_tag_eq_vec       = VecInit((0 until PortNumber).map( p => VecInit((0 until nWays).map( w => s1_meta_ptags(p)(w) === s1_req_ptags(p)))))
   val s1_tag_match_vec    = VecInit((0 until PortNumber).map( k => VecInit(s1_tag_eq_vec(k).zipWithIndex.map{ case(way_tag_eq, w) => way_tag_eq && s1_meta_valids(k)(w)})))
-  val s1_SRAM_ways        = ResultHoldBypass(data = s1_tag_match_vec, valid = RegNext(s0_fire))
-  val s1_SRAM_hits        = s1_SRAM_ways.map(ParallelOR(_))
+  val s1_SRAM_hits        = ResultHoldBypass(data = VecInit(s1_tag_match_vec.map(ParallelOR(_))), valid = RegNext(s0_fire))
+  val s1_SRAM_waymasks    = s1_tag_match_vec.map(_.asUInt)
 
   /**
     ******************************************************************************
@@ -172,24 +172,68 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
   val s1_MSHR_match = VecInit((0 until PortNumber).map(i => (s1_req_vSetIdx(i) === fromMSHR.bits.vSetIdx) &&
                                                             (s1_req_ptags(i) === getPhyTagFromBlk(fromMSHR.bits.blkPaddr)) &&
                                                             s1_valid && fromMSHR.valid && !fromMSHR.bits.corrupt))
-  val s1_MSHR_ways  = (0 until PortNumber).map(i => ResultHoldBypass(data = fromMSHR.bits.way, valid = s1_MSHR_match(i)))
+  val s1_MSHR_ways  = (0 until PortNumber).map(i => ResultHoldBypass(data = fromMSHR.bits.waymask, valid = s1_MSHR_match(i)))
   val s1_MSHR_hits  = (0 until PortNumber).map(i => ValidHoldBypass(s1_MSHR_match(i), s1_fire || s1_flush || s1_discard))
 
-  assert((s1_valid && (s1_SRAM_hits(0) ^ s1_MSHR_match(0))) && (s1_valid && s1_doubleline && (s1_SRAM_hits(1) ^ s1_MSHR_match(1))),
-        "Multi hit in iprefetch s1: vaddr0=0x%x s1_SRAM_hits(0)=%d s1_MSHR_match(0)=%d s1_SRAM_hits(1)=%d s1_MSHR_match(1)=%d",
-        s0_req_vaddr(0), s1_SRAM_hits(0), s1_MSHR_match(0), s1_SRAM_hits(1), s1_MSHR_match(1))
+  when(s1_valid) {
+    assert(!(s1_SRAM_hits(0) && s1_MSHR_match(0)) && (!s1_doubleline || !(s1_SRAM_hits(1) && s1_MSHR_match(1))),
+          "Multi hit in iprefetch s1: vaddr0=0x%x s1_SRAM_hits(0)=%d s1_MSHR_match(0)=%d s1_SRAM_hits(1)=%d s1_MSHR_match(1)=%d",
+          s1_req_vaddr(0), s1_SRAM_hits(0), s1_MSHR_match(0), s1_SRAM_hits(1), s1_MSHR_match(1))
+  }
+
+  when(s1_fire) {
+    assert(PopCount(s1_tag_match_vec(0)) <= 1.U && (PopCount(s1_tag_match_vec(1)) <= 1.U || !s1_doubleline),
+      "Multiple hit in main pipe, port0:is=%d,ptag=0x%x,vidx=0x%x,vaddr=0x%x port1:is=%d,ptag=0x%x,vidx=0x%x,vaddr=0x%x ",
+      PopCount(s1_tag_match_vec(0)) > 1.U,s1_req_ptags(0), get_idx(s1_req_vaddr(0)), s1_req_vaddr(0),
+      PopCount(s1_tag_match_vec(1)) > 1.U && s1_doubleline, s1_req_ptags(1), get_idx(s1_req_vaddr(1)), s1_req_vaddr(1))
+  }
 
   /**
     ******************************************************************************
-    * write wayLookup
-    ******************************************************************************
+    * write wayLookup (blocked when wayLookup not ready)
+    ******** **********************************************************************
     */
-  toWayLookup.valid             := RegNext(s0_fire) && !s1_flush
+  def update_waymask(mask: UInt, vSetIdx: UInt, ptag: UInt): UInt = {
+    require(mask.getWidth == nWays)
+    val new_mask  = WireInit(mask)
+    val vset_same = (fromMSHR.bits.vSetIdx === vSetIdx) && !fromMSHR.bits.corrupt && fromMSHR.valid
+    val ptag_same = getPhyTagFromBlk(fromMSHR.bits.blkPaddr) === ptag
+    val way_same  = fromMSHR.bits.waymask === mask
+    when(vset_same) {
+      when(ptag_same) {
+        new_mask := fromMSHR.bits.waymask
+      }.elsewhen(way_same) {
+        new_mask := 0.U
+      }
+    }
+    new_mask
+  }
+
+  val s1_waymasks_reg = RegInit(VecInit(Seq.fill(PortNumber)(0.U(nWays.W))))
+  val s1_waymasks = WireInit(s1_waymasks_reg)
+  s1_waymasks_reg := s1_waymasks
+  (0 until PortNumber).foreach{i =>
+    when(RegNext(s0_fire)) {
+      s1_waymasks(i) := update_waymask(s1_SRAM_waymasks(i), s1_req_vSetIdx(i), s1_req_ptags(i))
+    }.otherwise {
+      s1_waymasks(i) := update_waymask(s1_waymasks_reg(i), s1_req_vSetIdx(i), s1_req_ptags(i))
+    }
+  }
+
+  val has_write = RegInit(false.B)
+  when(s0_fire || s1_flush) {
+    has_write := false.B
+  }.elsewhen(toWayLookup.fire) {
+    has_write := true.B
+  }
+
+  // disable write wayLookup when SRAM write valid
+  toWayLookup.valid             := s1_valid && !has_write && !fromMSHR.valid && !s1_flush
   toWayLookup.bits.ptag         := s1_req_ptags
-  toWayLookup.bits.vSetIdx      := s1_req_vSetIdx(0)
+  toWayLookup.bits.vSetIdx      := s1_req_vSetIdx
   toWayLookup.bits.excp_tlb_af  := tlbExcpAF
   toWayLookup.bits.excp_tlb_pf  := tlbExcpPF
-  toWayLookup.bits.way          := VecInit((0 until PortNumber).map(i => Mux(s1_MSHR_hits(i), s1_MSHR_ways(i), OHToUInt(s1_SRAM_ways(i)))))
+  toWayLookup.bits.waymask      := s1_waymasks
 
   val s1_need_miss = VecInit(Seq(!s1_SRAM_hits(0) && !s1_MSHR_hits(0) && !tlbExcp(0),
                             !s1_SRAM_hits(1) && !s1_MSHR_hits(1) && !tlbExcp(0) && !tlbExcp(1) && s1_doubleline))
@@ -199,9 +243,10 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
 
   /** Stage 1 control */
   val s1_has_miss = s1_need_miss.reduce(_||_) && enableBit
-  s1_ready      := s2_ready || !s1_valid
-  s1_fire       := s2_ready && s1_valid && s1_has_miss && !s1_flush
-  s1_discard    := s1_valid && !s1_has_miss
+  val s1_finish   = has_write || toWayLookup.fire
+  s1_ready      := (s2_ready && s1_finish) || !s1_valid
+  s1_fire       := s2_ready && s1_valid && s1_finish && s1_has_miss && !s1_flush
+  s1_discard    := s1_valid && s1_finish && !s1_has_miss
 
   /**
     ******************************************************************************
@@ -213,7 +258,7 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
     */
   val s2_valid  = generatePipeControl(lastFire = s1_fire, thisFire = s2_fire, thisFlush = s2_flush, lastFlush = false.B)
 
-  val s2_req_vaddr    = RegEnable(s1_req_vaddrs, s1_fire)
+  val s2_req_vaddr    = RegEnable(s1_req_vaddr, s1_fire)
   val s2_doubleline   = RegEnable(s1_doubleline, s1_fire)
   val s2_req_paddr    = RegEnable(s1_req_paddr, s1_fire)
   val s2_need_miss    = RegEnable(s1_need_miss, s1_fire)

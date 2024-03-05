@@ -173,8 +173,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     ******************************************************************************
     */
   fromWayLookup.ready := s0_fire
-  val s0_ways         = fromWayLookup.bits.way
-  val s0_waymasks     = s0_ways.map(UIntToOH(_).asTypeOf(Vec(4, Bool())))
+  val s0_waymasks     = VecInit(fromWayLookup.bits.waymask.map(_.asTypeOf(Vec(nWays, Bool()))))
   val s0_req_ptags    = fromWayLookup.bits.ptag
   val s0_excp_tlb_af  = fromWayLookup.bits.excp_tlb_af
   val s0_excp_tlb_pf  = fromWayLookup.bits.excp_tlb_pf
@@ -220,7 +219,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   val s1_hits         = RegEnable(s0_hits, s0_fire)
   val s1_excp_tlb_af  = RegEnable(s0_excp_tlb_af, s0_fire)
   val s1_excp_tlb_pf  = RegEnable(s0_excp_tlb_pf, s0_fire)
-  val s1_ways         = RegEnable(s0_ways, s0_fire)
+  val s1_waymasks     = RegEnable(s0_waymasks, s0_fire)
 
   val s1_req_vSetIdx  = s1_req_vaddr.map(get_idx(_))
   val s1_req_paddr    = s1_req_vaddr.zip(s1_req_ptags).map{case(vaddr, ptag) => get_paddr_from_ptag(vaddr, ptag)}
@@ -234,7 +233,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     */
   (0 until PortNumber).foreach{ i =>
     io.touch(i).bits.vSetIdx  := s1_req_vSetIdx(i)
-    io.touch(i).bits.way      := s1_ways(i)
+    io.touch(i).bits.way      := OHToUInt(s1_waymasks(i))
   }
   io.touch(0).valid := RegNext(s0_fire) && s1_hits(0)
   io.touch(1).valid := RegNext(s0_fire) && s1_hits(1) && s1_doubleline
@@ -287,9 +286,11 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   s1_ready := s2_ready || !s1_valid
   s1_fire  := s1_valid && s2_ready && !s1_flush
 
-  assert((s1_valid && (s1_hits(0) ^ s1_MSHR_match(0))) && (s1_valid && s1_doubleline && (s1_hits(1) ^ s1_MSHR_match(1))),
-        "Multi hit in mainPipe s1: vaddr0=0x%x s1_hits(0)=%d s1_MSHR_match(0)=%d s1_hits(1)=%d s1_MSHR_match(1)=%d",
-        s0_req_vaddr(0), s1_hits(0), s1_MSHR_match(0), s1_hits(1), s1_MSHR_match(1))
+  when(s1_valid) {
+    assert(!(s1_hits(0) && s1_MSHR_match(0)) && (!s1_doubleline || !(s1_hits(1) && s1_MSHR_match(1))),
+          "Multi hit in mainPipe s1: vaddr0=0x%x s1_hits(0)=%d s1_MSHR_match(0)=%d s1_hits(1)=%d s1_MSHR_match(1)=%d",
+          s1_req_vaddr(0), s1_hits(0), s1_MSHR_match(0), s1_hits(1), s1_MSHR_match(1))
+  }
 
   /**
     ******************************************************************************
@@ -351,7 +352,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   (0 until PortNumber).foreach{i =>
     when(s1_fire) {
-      s2_hits(i) := s1_hits(i)
+      s2_hits(i) := s1_final_hits(i)
     }.elsewhen(s2_MSHR_hits(i)) {
       s2_hits(i) := true.B
     }
@@ -359,7 +360,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   (0 until PortNumber).foreach{i =>
     when(s1_fire) {
-      s2_datas(i) := s1_datas(i)
+      s2_datas(i) := s1_final_datas(i)
     }.elsewhen(s2_MSHR_hits(i)) {
       s2_datas(i) := s2_MSHR_datas(i)
     }
@@ -374,9 +375,11 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     }
   }
 
-  assert((s2_valid && (s2_hits(0) ^ s2_MSHR_match(0))) && (s2_valid && s2_doubleline && (s2_hits(1) ^ s2_MSHR_match(1))),
-        "Multi hit in mainPipe s2: vaddr0=0x%x s2_hits(0)=%d s2_MSHR_match(0)=%d s2_hits(1)=%d s2_MSHR_match(1)=%d",
-        s0_req_vaddr(0), s2_hits(0), s2_MSHR_match(0), s2_hits(1), s2_MSHR_match(1))
+  when(s1_valid) {
+    assert(!(s2_hits(0) && s2_MSHR_match(0)) && (!s2_doubleline || !(s2_hits(1) && s2_MSHR_match(1))),
+          "Multi hit in mainPipe s2: vaddr0=0x%x s2_hits(0)=%d s2_MSHR_match(0)=%d s2_hits(1)=%d s2_MSHR_match(1)=%d",
+          s2_req_vaddr(0), s2_hits(0), s2_MSHR_match(0), s2_hits(1), s2_MSHR_match(1))
+  }
 
   /**
     ******************************************************************************
@@ -418,14 +421,20 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     ******************************************************************************
     */
   (0 until PortNumber).map{ i =>
-    if(i ==0) toIFU(i).valid          := s2_fire
-      else   toIFU(i).valid           := s2_fire && s2_doubleline
-    toIFU(i).bits.paddr               := s2_req_paddr(i)
-    toIFU(i).bits.vaddr               := s2_req_vaddr(i)
-    toIFU(i).bits.data                := s2_datas(i)
-    toIFU(i).bits.tlbExcp.pageFault   := s2_excp_tlb_pf(i)
-    toIFU(i).bits.tlbExcp.accessFault := s2_excp_tlb_af(i) || s2_excp_pmp_af(i) || s2_corrupt(i)
-    toIFU(i).bits.tlbExcp.mmio        := s2_excp_pmp_mmio(0) && !s2_excp_tlb(0) && s2_excp_pmp_af(0)
+    if(i == 0) {
+      toIFU(i).valid                    := s2_fire
+      toIFU(i).bits.tlbExcp.pageFault   := s2_excp_tlb_pf(i)
+      toIFU(i).bits.tlbExcp.accessFault := s2_excp_tlb_af(i) || s2_excp_pmp_af(i) || s2_corrupt(i)
+      toIFU(i).bits.tlbExcp.mmio        := s2_excp_pmp_mmio(0) && !s2_excp_tlb(0) && !s2_excp_pmp_af(0)
+    } else {
+      toIFU(i).valid                    := s2_fire && s2_doubleline
+      toIFU(i).bits.tlbExcp.pageFault   := s2_excp_tlb_pf(i) && s2_doubleline
+      toIFU(i).bits.tlbExcp.accessFault := (s2_excp_tlb_af(i) || s2_excp_pmp_af(i) || s2_corrupt(i)) && s2_doubleline
+      toIFU(i).bits.tlbExcp.mmio        := (s2_excp_pmp_mmio(0) && !s2_excp_tlb(0) && !s2_excp_pmp_af(0)) && s2_doubleline
+    }
+    toIFU(i).bits.vaddr                 := s2_req_vaddr(i)
+    toIFU(i).bits.paddr                 := s2_req_paddr(i)
+    toIFU(i).bits.data                  := s2_datas(i)
   }
 
   s2_flush := io.flush

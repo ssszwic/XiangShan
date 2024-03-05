@@ -89,7 +89,7 @@ class ICacheMissReq(implicit p: Parameters) extends ICacheBundle {
 class ICacheMissResp(implicit p: Parameters) extends ICacheBundle {
   val blkPaddr  = UInt((PAddrBits - blockOffBits).W)
   val vSetIdx   = UInt(idxBits.W)
-  val way       = UInt(log2Ceil(nWays).W)
+  val waymask   = UInt(nWays.W)
   val data      = UInt(blockBits.W)
   val corrupt   = Bool()
 }
@@ -142,7 +142,7 @@ class ICacheMSHR(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
   // }
 
   // invalid when the req hasn't been issued
-  when(io.fencei) {
+  when(io.fencei || io.flush) {
     fencei  := true.B
     flush   := true.B
     when(!issue) {
@@ -163,7 +163,7 @@ class ICacheMSHR(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
 
   // send request to L2
   io.acquire.valid := valid && !issue && !io.flush && !io.fencei
-  val getBlock = edge.Get(
+  val getBlock = edge.Get( 
     fromSource  = ID.U,
     toAddress   = Cat(blkPaddr, 0.U(blockOffBits.W)),
     lgSize      = (log2Up(cacheParams.blockBytes)).U
@@ -374,7 +374,7 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
   io.fetch_resp.valid         := mshr_resp.valid && last_fire_r && !io.flush && !io.fencei
   io.fetch_resp.bits.blkPaddr := mshr_resp.bits.blkPaddr
   io.fetch_resp.bits.vSetIdx  := mshr_resp.bits.vSetIdx
-  io.fetch_resp.bits.way      := io.victim.way
+  io.fetch_resp.bits.waymask  := waymask
   io.fetch_resp.bits.data     := respDataReg.asUInt
   io.fetch_resp.bits.corrupt  := corrupt_r
 

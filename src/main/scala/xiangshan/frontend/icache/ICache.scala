@@ -355,6 +355,8 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheArray
     val readResp = Output(new ICacheDataRespBundle)
   }}
 
+  dontTouch(io)
+
   /**
     ******************************************************************************
     * data array
@@ -574,7 +576,6 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
   io.toIFU := mainPipe.io.fetch.req.ready
   io.perfInfo := mainPipe.io.perfInfo
 
-  io.prefetch.req.ready := false.B
   io.fetch.resp              <> mainPipe.io.fetch.resp
   io.fetch.topdownIcacheMiss := mainPipe.io.fetch.topdownIcacheMiss
   io.fetch.topdownItlbMiss   := mainPipe.io.fetch.topdownItlbMiss

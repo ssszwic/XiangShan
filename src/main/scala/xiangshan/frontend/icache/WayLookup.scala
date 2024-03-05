@@ -30,7 +30,7 @@ import xiangshan.XSCoreParamsKey
 import utility._
 
 class WayLookupRead(implicit p: Parameters) extends ICacheBundle {
-  val way         = Vec(PortNumber, UInt(log2Ceil(nWays).W))
+  val waymask     = Vec(PortNumber, UInt(nWays.W))
   val ptag        = Vec(PortNumber, UInt(tagBits.W))
   val excp_tlb_af = Vec(PortNumber, Bool())
   val excp_tlb_pf = Vec(PortNumber, Bool())
@@ -39,9 +39,9 @@ class WayLookupRead(implicit p: Parameters) extends ICacheBundle {
 }
 
 class WayLookupWrite(implicit p: Parameters) extends ICacheBundle {
-  val vSetIdx       = UInt(idxBits.W)
+  val vSetIdx       = Vec(PortNumber, UInt(idxBits.W))
   val ptag          = Vec(PortNumber, UInt(tagBits.W))
-  val way           = Vec(PortNumber, UInt(log2Ceil(nWays).W))
+  val waymask       = Vec(PortNumber, UInt(nWays.W))
   val excp_tlb_af   = Vec(PortNumber, Bool())
   val excp_tlb_pf   = Vec(PortNumber, Bool())
 }
@@ -86,12 +86,11 @@ class WayLookup(implicit p: Parameters) extends ICacheModule {
   }
 
   class WayLookupEntry(implicit p: Parameters) extends ICacheBundle {
-    val first_vSetIdx = UInt(idxBits.W)
+    val vSetIdx       = Vec(PortNumber, UInt(idxBits.W))
     val ptag          = Vec(PortNumber, UInt(tagBits.W))
-    val way           = Vec(PortNumber, UInt(log2Ceil(nWays).W))
+    val waymask       = Vec(PortNumber, UInt(nWays.W))
     val excp_tlb_af   = Vec(PortNumber, Bool())
     val excp_tlb_pf   = Vec(PortNumber, Bool())
-    def vSetIdx       = VecInit(Seq(first_vSetIdx, first_vSetIdx + 1.U))
   }
 
   val entries         = RegInit(VecInit(Seq.fill(nWayLookupSize)(0.U.asTypeOf((new WayLookupEntry).cloneType))))
@@ -123,11 +122,20 @@ class WayLookup(implicit p: Parameters) extends ICacheModule {
   val hits = Wire(Vec(nWayLookupSize, Bool()))
   entries.zip(hits).foreach{case(entry, hit) =>
     val hit_vec = Wire(Vec(PortNumber, Bool()))
-    (0 until PortNumber).foreach { i => 
-      hit_vec(i) := (io.update.bits.vSetIdx === entry.vSetIdx(i)) && 
-                       (getPhyTagFromBlk(io.update.bits.blkPaddr) === entry.ptag(i)) && 
-                       !io.update.bits.corrupt && io.update.valid
-      entry.way(i) := Mux(hit_vec(i), io.update.bits.way, entry.way(i))
+    (0 until PortNumber).foreach { i =>
+      val vset_same = (io.update.bits.vSetIdx === entry.vSetIdx(i)) && !io.update.bits.corrupt && io.update.valid
+      val ptag_same = getPhyTagFromBlk(io.update.bits.blkPaddr) === entry.ptag(i)
+      val way_same = io.update.bits.waymask === entry.waymask(i)
+      when(vset_same) {
+        when(ptag_same) {
+          // miss -> hit
+          entry.waymask(i) := io.update.bits.waymask
+        }.elsewhen(way_same) {
+          // data is overwritten: hit -> miss
+          entry.waymask(i) := 0.U
+        }
+      }
+      hit_vec(i) := vset_same && (ptag_same || way_same)
     }
     hit := hit_vec.reduce(_||_)
   }
@@ -140,7 +148,7 @@ class WayLookup(implicit p: Parameters) extends ICacheModule {
   // disalbe read when entries(0) update
   io.read.valid             := !empty && !hits(readPtr.value)
   io.read.bits.ptag         := entries(readPtr.value).ptag
-  io.read.bits.way          := entries(readPtr.value).way
+  io.read.bits.waymask      := entries(readPtr.value).waymask
   io.read.bits.vSetIdx      := entries(readPtr.value).vSetIdx
   io.read.bits.excp_tlb_af  := entries(readPtr.value).excp_tlb_af
   io.read.bits.excp_tlb_pf  := entries(readPtr.value).excp_tlb_pf
@@ -153,9 +161,9 @@ class WayLookup(implicit p: Parameters) extends ICacheModule {
     */
   io.write.ready := !full
   when(io.write.fire) {
-    entries(writePtr.value).first_vSetIdx := io.write.bits.vSetIdx
+    entries(writePtr.value).vSetIdx       := io.write.bits.vSetIdx
     entries(writePtr.value).ptag          := io.write.bits.ptag
-    entries(writePtr.value).way           := io.write.bits.way
+    entries(writePtr.value).waymask       := io.write.bits.waymask
     entries(writePtr.value).excp_tlb_af   := io.write.bits.excp_tlb_af
     entries(writePtr.value).excp_tlb_pf   := io.write.bits.excp_tlb_pf
   }
