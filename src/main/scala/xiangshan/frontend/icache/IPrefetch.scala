@@ -238,7 +238,7 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
   val s1_need_miss = VecInit(Seq(!s1_SRAM_hits(0) && !s1_MSHR_hits(0) && !tlbExcp(0),
                             !s1_SRAM_hits(1) && !s1_MSHR_hits(1) && !tlbExcp(0) && !tlbExcp(1) && s1_doubleline))
 
-  from_bpu_s1_flush := fromFtq.flushFromBpu.shouldFlushByStage3(s1_req_ftqIdx)
+  from_bpu_s1_flush := s1_valid && fromFtq.flushFromBpu.shouldFlushByStage3(s1_req_ftqIdx)
   s1_flush := io.flush || from_bpu_s1_flush
 
   /** Stage 1 control */
