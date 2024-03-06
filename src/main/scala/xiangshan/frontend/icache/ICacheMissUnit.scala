@@ -297,7 +297,8 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheMiss
     */
   // When the FIFO is full, enqueue and dequeue operations do not occur at the same cycle.
   // So the depth of the FIFO is set to match the number of MSHRs.
-  val priorityFIFO = Module(new Queue(UInt(log2Ceil(nPrefetchMshr).W), nPrefetchMshr, hasFlush=true))
+  // val priorityFIFO = Module(new Queue(UInt(log2Ceil(nPrefetchMshr).W), nPrefetchMshr, hasFlush=true))
+  val priorityFIFO = Module(new FIFOReg(UInt(log2Ceil(nPrefetchMshr).W), nPrefetchMshr, hasFlush=true))
   priorityFIFO.io.flush.get := io.flush || io.fencei
   priorityFIFO.io.enq.valid := prefetchDemux.io.in.fire
   priorityFIFO.io.enq.bits  := prefetchDemux.io.chosen
