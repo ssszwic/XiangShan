@@ -1149,6 +1149,8 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
 
   // when redirect, we should reset ptrs and status queues
   io.icacheFlush := redirectVec.map(r => r.valid).reduce(_||_)
+  XSPerfAccumulate("icacheFlushFromBackend", backendRedirect.valid)
+  XSPerfAccumulate("icacheFlushFromIFU", fromIfuRedirect.valid)
   when(redirectVec.map(r => r.valid).reduce(_||_)){
     val r = PriorityMux(redirectVec.map(r => (r.valid -> r.bits)))
     val notIfu = redirectVec.dropRight(1).map(r => r.valid).reduce(_||_)

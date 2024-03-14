@@ -329,6 +329,7 @@ class IPrefetchPipe(implicit p: Parameters) extends  IPrefetchModule
   XSPerfAccumulate("prefetch_req_receive", fromFtq.req.fire)
   // the number of prefetch request sent to missUnit
   XSPerfAccumulate("prefetch_req_send", toMSHR.fire)
+  XSPerfAccumulate("to_missUnit_stall", toMSHR.valid && !toMSHR.ready)
   /**
     * Count the number of requests that are filtered for various reasons.
     * The number of prefetch discard in Performance Accumulator may be
