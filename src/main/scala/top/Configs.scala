@@ -130,7 +130,6 @@ class MinimalConfig(n: Int = 1) extends Config(
           fetchi = true,
           useDmode = false,
           NWays = 4,
-          missSameCycle = true
         ),
         ldtlbParameters = TLBParameters(
           name = "ldtlb",
